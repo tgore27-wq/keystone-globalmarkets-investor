@@ -1,0 +1,75 @@
+name: Daily Market Reports
+
+on:
+  schedule:
+    # All times UTC — US Eastern is UTC-4 (EDT) or UTC-5 (EST)
+    - cron: '0 12 * * 1-5'    # 8:00 AM ET  — Open report
+    - cron: '30 20 * * 1-5'   # 4:30 PM ET  — Close report
+    - cron: '0 21 * * 5'      # 5:00 PM ET  — Weekly recap (Fridays only)
+  workflow_dispatch:           # allow manual trigger from GitHub UI
+    inputs:
+      report_type:
+        description: 'Report type (open / close / weekly / all)'
+        required: true
+        default: 'open'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests yfinance
+
+      - name: Determine report type from schedule
+        id: report_type
+        run: |
+          HOUR=$(date -u +%H)
+          MINUTE=$(date -u +%M)
+          DOW=$(date -u +%u)   # 1=Mon … 7=Sun
+          INPUT_TYPE="${{ github.event.inputs.report_type }}"
+
+          if [[ -n "$INPUT_TYPE" ]]; then
+            echo "type=$INPUT_TYPE" >> $GITHUB_OUTPUT
+          elif [[ "$HOUR" == "12" ]]; then
+            echo "type=open" >> $GITHUB_OUTPUT
+          elif [[ "$HOUR" == "20" ]]; then
+            echo "type=close" >> $GITHUB_OUTPUT
+          elif [[ "$HOUR" == "21" && "$DOW" == "5" ]]; then
+            echo "type=weekly" >> $GITHUB_OUTPUT
+          else
+            echo "type=open" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Write .env from secrets
+        run: |
+          cat > .env <<EOF
+          POLYGON_API_KEY=${{ secrets.POLYGON_API_KEY }}
+          ALPHA_VANTAGE_API_KEY=${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
+          FMP_API_KEY=${{ secrets.FMP_API_KEY }}
+          FRED_API_KEY=${{ secrets.FRED_API_KEY }}
+          EOF
+
+      - name: Generate report
+        run: |
+          TYPE=${{ steps.report_type.outputs.type }}
+          DATE=$(date -u +%Y-%m-%d)
+          python3 generate_report.py --type "$TYPE" --date "$DATE"
+
+      - name: Commit and push
+        run: |
+          git config user.name  "GlobalMarkets Bot"
+          git config user.email "bot@globalmarkets.lucren"
+          git add Open/ Close/ Weekly/
+          git diff --cached --quiet || \
+            git commit -m "Auto: ${{ steps.report_type.outputs.type }} report $(date -u +%Y-%m-%d)" && \
+            git push
