@@ -10,37 +10,48 @@ on:
     - cron: '30 13 * * 1-5'   # 9:30 AM ET  — Open report   (Mon-Fri)
     - cron: '0 20 * * 1-5'    # 4:00 PM ET  — Close report  (Mon-Fri)
     - cron: '0 21 * * 5'      # 5:00 PM ET  — Weekly recap  (Friday only)
+    - cron: '0 14 1 * *'      # 10:00 AM ET — Monthly recap (1st of each month)
   workflow_dispatch:
     inputs:
       report_type:
-        description: 'Report type: open | close | weekly | all'
+        description: 'Report type: open | close | weekly | monthly | all'
         required: true
         default: 'open'
       report_date:
         description: 'Date override (YYYY-MM-DD). Leave blank for today.'
         required: false
         default: ''
+      report_month:
+        description: 'Month override for monthly reports (YYYY-MM). Leave blank for previous month.'
+        required: false
+        default: ''
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Daily / Weekly job  (open, close, weekly, all)
+  # ---------------------------------------------------------------------------
   generate:
     runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' && github.event.inputs.report_type != 'monthly'
+      || (github.event_name == 'schedule' && (
+           github.event.schedule == '30 13 * * 1-5' ||
+           github.event.schedule == '0 20 * * 1-5'  ||
+           github.event.schedule == '0 21 * * 5'
+         ))
 
     steps:
-      # -----------------------------------------------------------------------
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # -----------------------------------------------------------------------
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      # -----------------------------------------------------------------------
       - name: Install dependencies
         run: pip install requests yfinance anthropic
 
-      # -----------------------------------------------------------------------
       - name: Determine report type
         id: ctx
         run: |
@@ -49,14 +60,11 @@ jobs:
           INPUT_TYPE="${{ github.event.inputs.report_type }}"
           INPUT_DATE="${{ github.event.inputs.report_date }}"
 
-          # Type
           if [[ -n "$INPUT_TYPE" ]]; then
             TYPE="$INPUT_TYPE"
           elif [[ "$HOUR" == "13" ]]; then
             TYPE="open"
-          elif [[ "$HOUR" == "20" && "$DOW" != "5" ]]; then
-            TYPE="close"
-          elif [[ "$HOUR" == "20" && "$DOW" == "5" ]]; then
+          elif [[ "$HOUR" == "20" ]]; then
             TYPE="close"
           elif [[ "$HOUR" == "21" && "$DOW" == "5" ]]; then
             TYPE="weekly"
@@ -64,21 +72,19 @@ jobs:
             TYPE="open"
           fi
 
-          # Date
           if [[ -n "$INPUT_DATE" ]]; then
             DATE="$INPUT_DATE"
           else
             DATE=$(date -u +%Y-%m-%d)
           fi
 
-          echo "type=$TYPE"  >> $GITHUB_OUTPUT
-          echo "date=$DATE"  >> $GITHUB_OUTPUT
+          echo "type=$TYPE" >> $GITHUB_OUTPUT
+          echo "date=$DATE" >> $GITHUB_OUTPUT
           echo "Report type: $TYPE | Date: $DATE"
 
-      # -----------------------------------------------------------------------
       - name: Write .env from GitHub Secrets
         run: |
-          cat > .env << 'ENVEOF'
+          cat > .env << ENVEOF
           POLYGON_API_KEY=${{ secrets.POLYGON_API_KEY }}
           ALPHA_VANTAGE_API_KEY=${{ secrets.ALPHA_VANTAGE_API_KEY }}
           FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
@@ -87,27 +93,22 @@ jobs:
           ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           ENVEOF
 
-      # -----------------------------------------------------------------------
       - name: Generate price data (generate_report.py)
         run: |
           TYPE=${{ steps.ctx.outputs.type }}
           DATE=${{ steps.ctx.outputs.date }}
           python3 generate_report.py --type "$TYPE" --date "$DATE"
 
-      # -----------------------------------------------------------------------
       - name: Fill narrative sections (fill_narratives.py)
         run: |
           TYPE=${{ steps.ctx.outputs.type }}
           DATE=${{ steps.ctx.outputs.date }}
-
           FILL_FLAG="--today"
           [[ "$TYPE" == "weekly" ]] && FILL_FLAG="--weekly"
           [[ "$TYPE" == "all" ]]    && FILL_FLAG="--all"
-
           python3 fill_narratives.py $FILL_FLAG --date "$DATE"
 
-      # -----------------------------------------------------------------------
-      - name: Commit and push completed reports
+      - name: Commit and push completed report
         run: |
           git config user.name  "GlobalMarkets Bot"
           git config user.email "bot@globalmarkets.lucren"
@@ -118,5 +119,77 @@ jobs:
             TYPE=${{ steps.ctx.outputs.type }}
             DATE=${{ steps.ctx.outputs.date }}
             git commit -m "Auto: $TYPE report $DATE [price + narrative]"
+            git push
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Monthly job
+  # ---------------------------------------------------------------------------
+  generate-monthly:
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'monthly')
+      || (github.event_name == 'schedule' && github.event.schedule == '0 14 1 * *')
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests yfinance anthropic
+
+      - name: Determine month
+        id: mctx
+        run: |
+          INPUT_MONTH="${{ github.event.inputs.report_month }}"
+          if [[ -n "$INPUT_MONTH" ]]; then
+            MONTH="$INPUT_MONTH"
+          else
+            # Previous month
+            MONTH=$(date -u -d "$(date +%Y-%m-01) -1 day" +%Y-%m 2>/dev/null \
+                    || python3 -c "
+from datetime import datetime, timedelta
+d = datetime.utcnow().replace(day=1) - timedelta(days=1)
+print(d.strftime('%Y-%m'))")
+          fi
+          echo "month=$MONTH" >> $GITHUB_OUTPUT
+          echo "Monthly report for: $MONTH"
+
+      - name: Write .env from GitHub Secrets
+        run: |
+          cat > .env << ENVEOF
+          POLYGON_API_KEY=${{ secrets.POLYGON_API_KEY }}
+          ALPHA_VANTAGE_API_KEY=${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
+          FMP_API_KEY=${{ secrets.FMP_API_KEY }}
+          FRED_API_KEY=${{ secrets.FRED_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+          ENVEOF
+
+      - name: Generate monthly price data (generate_monthly.py)
+        run: |
+          MONTH=${{ steps.mctx.outputs.month }}
+          python3 generate_monthly.py --month "$MONTH"
+
+      - name: Fill monthly narrative (fill_narratives.py)
+        run: |
+          MONTH=${{ steps.mctx.outputs.month }}
+          python3 fill_narratives.py --monthly --month "$MONTH"
+
+      - name: Commit and push monthly report
+        run: |
+          git config user.name  "GlobalMarkets Bot"
+          git config user.email "bot@globalmarkets.lucren"
+          git add Monthly/
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            MONTH=${{ steps.mctx.outputs.month }}
+            git commit -m "Auto: monthly report $MONTH [price + narrative]"
             git push
           fi

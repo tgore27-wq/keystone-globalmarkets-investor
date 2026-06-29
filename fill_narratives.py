@@ -222,9 +222,11 @@ def main():
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--today",   action="store_true", help="Open + Close for today")
     group.add_argument("--weekly",  action="store_true", help="Weekly for current week")
+    group.add_argument("--monthly", action="store_true", help="Monthly report (defaults to previous month)")
     group.add_argument("--all",     action="store_true", help="Open + Close + Weekly")
     parser.add_argument("files",    nargs="*",           help="Specific .md files to fill")
     parser.add_argument("--date",   default=None,        help="Override date YYYY-MM-DD")
+    parser.add_argument("--month",  default=None,        help="Override month YYYY-MM (for --monthly)")
     args = parser.parse_args()
 
     today = datetime.strptime(args.date, "%Y-%m-%d") if args.date else datetime.now()
@@ -248,6 +250,16 @@ def main():
         ]
     elif args.weekly:
         targets = [BASE / "Weekly" / f"Weekly_{mon_str}.md"]
+    elif args.monthly:
+        if args.month:
+            yr, mo = int(args.month[:4]), int(args.month[5:7])
+        else:
+            first = today.replace(day=1)
+            prev  = first - timedelta(days=1)
+            yr, mo = prev.year, prev.month
+        from datetime import datetime as _dt
+        month_slug = _dt(yr, mo, 1).strftime("%m-%Y")
+        targets = [BASE / "Monthly" / f"Monthly_{month_slug}.md"]
     elif args.all:
         targets = [
             BASE / "Open"   / f"Open_{date_str}.md",
@@ -255,9 +267,8 @@ def main():
             BASE / "Weekly" / f"Weekly_{mon_str}.md",
         ]
     else:
-        # Default: fill all files modified today that have placeholder text
-        today_str = today.strftime("%Y-%m-%d")
-        for folder in ("Open", "Close", "Weekly"):
+        # Default: fill all files that have placeholder text
+        for folder in ("Open", "Close", "Weekly", "Monthly"):
             for f in sorted((BASE / folder).glob("*.md")):
                 if "Template" in f.name:
                     continue
@@ -265,7 +276,7 @@ def main():
                 if "[Fill in]" in content or "- \n- \n- " in content:
                     targets.append(f)
         if not targets:
-            print("No unfilled reports found. Pass --today, --weekly, or file paths.")
+            print("No unfilled reports found. Pass --today, --weekly, --monthly, or file paths.")
             return
 
     for path in targets:
