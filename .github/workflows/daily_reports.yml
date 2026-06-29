@@ -1,5 +1,8 @@
 name: Daily Market Reports
 
+permissions:
+  contents: write
+
 on:
   schedule:
     # All times UTC — Eastern Daylight Time (EDT) = UTC-4 (summer)
