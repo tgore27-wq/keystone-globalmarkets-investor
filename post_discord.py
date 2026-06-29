@@ -17,7 +17,10 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import tempfile
 import requests
+
+from convert_to_pdf import convert as md_to_pdf
 
 # ---------------------------------------------------------------------------
 # Config
@@ -112,19 +115,22 @@ def post_report(report_type: str, path: Path) -> bool:
         return False
 
     title = format_title(report_type, path)
-    filename = path.name
+    pdf_name = path.stem + ".pdf"
 
-    print(f"  Posting to Discord: {title}")
-    print(f"  File: {filename}  →  #{report_type}-report channel")
-
+    print(f"  Converting to PDF: {path.name} → {pdf_name}")
     try:
-        with open(path, "rb") as fh:
-            resp = requests.post(
-                webhook_url,
-                data={"content": f"**{title}**"},
-                files={"file": (filename, fh, "text/plain; charset=utf-8")},
-                timeout=30,
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = Path(tmpdir) / pdf_name
+            md_to_pdf(path, pdf_path)
+            print(f"  Posting to Discord: {title}")
+            print(f"  File: {pdf_name}  →  #{report_type}-report channel")
+            with open(pdf_path, "rb") as fh:
+                resp = requests.post(
+                    webhook_url,
+                    data={"content": f"**{title}**"},
+                    files={"file": (pdf_name, fh, "application/pdf")},
+                    timeout=60,
+                )
         if resp.status_code in (200, 204):
             print(f"  ✓ Posted successfully (HTTP {resp.status_code})")
             return True
