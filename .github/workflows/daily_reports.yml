@@ -27,18 +27,8 @@ on:
         default: ''
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Daily / Weekly job  (open, close, weekly, all)
-  # ---------------------------------------------------------------------------
   generate:
     runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'workflow_dispatch' && github.event.inputs.report_type != 'monthly'
-      || (github.event_name == 'schedule' && (
-           github.event.schedule == '30 13 * * 1-5' ||
-           github.event.schedule == '0 20 * * 1-5'  ||
-           github.event.schedule == '0 21 * * 5'
-         ))
 
     steps:
       - name: Checkout repo
@@ -52,14 +42,17 @@ jobs:
       - name: Install dependencies
         run: pip install requests yfinance anthropic xhtml2pdf markdown
 
-      - name: Determine report type
+      - name: Determine report type and date
         id: ctx
         run: |
           HOUR=$(date -u +%H)
-          DOW=$(date -u +%u)
+          DAY=$(date -u +%d)
+          DOW=$(date -u +%u)   # 1=Mon … 5=Fri
           INPUT_TYPE="${{ github.event.inputs.report_type }}"
           INPUT_DATE="${{ github.event.inputs.report_date }}"
+          INPUT_MONTH="${{ github.event.inputs.report_month }}"
 
+          # ── Type detection ──────────────────────────────────────────────
           if [[ -n "$INPUT_TYPE" ]]; then
             TYPE="$INPUT_TYPE"
           elif [[ "$HOUR" == "13" ]]; then
@@ -68,23 +61,36 @@ jobs:
             TYPE="close"
           elif [[ "$HOUR" == "21" && "$DOW" == "5" ]]; then
             TYPE="weekly"
+          elif [[ "$HOUR" == "14" && "$DAY" == "01" ]]; then
+            TYPE="monthly"
           else
             TYPE="open"
           fi
 
+          # ── Date / month ────────────────────────────────────────────────
           if [[ -n "$INPUT_DATE" ]]; then
             DATE="$INPUT_DATE"
           else
             DATE=$(date -u +%Y-%m-%d)
           fi
 
-          echo "type=$TYPE" >> $GITHUB_OUTPUT
-          echo "date=$DATE" >> $GITHUB_OUTPUT
-          echo "Report type: $TYPE | Date: $DATE"
+          if [[ -n "$INPUT_MONTH" ]]; then
+            MONTH="$INPUT_MONTH"
+          else
+            MONTH=$(python3 -c "
+from datetime import datetime, timedelta
+d = datetime.utcnow().replace(day=1) - timedelta(days=1)
+print(d.strftime('%Y-%m'))")
+          fi
+
+          echo "type=$TYPE"   >> $GITHUB_OUTPUT
+          echo "date=$DATE"   >> $GITHUB_OUTPUT
+          echo "month=$MONTH" >> $GITHUB_OUTPUT
+          echo "Report type: $TYPE | Date: $DATE | Month: $MONTH"
 
       - name: Write .env from GitHub Secrets
         run: |
-          cat > .env << ENVEOF
+          cat > .env <<ENVEOF
           POLYGON_API_KEY=${{ secrets.POLYGON_API_KEY }}
           ALPHA_VANTAGE_API_KEY=${{ secrets.ALPHA_VANTAGE_API_KEY }}
           FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
@@ -93,126 +99,74 @@ jobs:
           ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           ENVEOF
 
-      - name: Generate price data (generate_report.py)
+      - name: Generate report — price data
         run: |
           TYPE=${{ steps.ctx.outputs.type }}
           DATE=${{ steps.ctx.outputs.date }}
-          python3 generate_report.py --type "$TYPE" --date "$DATE"
+          MONTH=${{ steps.ctx.outputs.month }}
 
-      - name: Fill narrative sections (fill_narratives.py)
+          if [[ "$TYPE" == "monthly" ]]; then
+            python3 generate_monthly.py --month "$MONTH"
+          elif [[ "$TYPE" == "all" ]]; then
+            python3 generate_report.py --type open   --date "$DATE"
+            python3 generate_report.py --type close  --date "$DATE"
+            python3 generate_report.py --type weekly --date "$DATE"
+          else
+            python3 generate_report.py --type "$TYPE" --date "$DATE"
+          fi
+
+      - name: Fill narrative sections — Claude API
         run: |
           TYPE=${{ steps.ctx.outputs.type }}
           DATE=${{ steps.ctx.outputs.date }}
-          FILL_FLAG="--today"
-          [[ "$TYPE" == "weekly" ]] && FILL_FLAG="--weekly"
-          [[ "$TYPE" == "all" ]]    && FILL_FLAG="--all"
-          python3 fill_narratives.py $FILL_FLAG --date "$DATE"
+          MONTH=${{ steps.ctx.outputs.month }}
+
+          if [[ "$TYPE" == "monthly" ]]; then
+            python3 fill_narratives.py --monthly --month "$MONTH"
+          elif [[ "$TYPE" == "weekly" ]]; then
+            python3 fill_narratives.py --weekly --date "$DATE"
+          elif [[ "$TYPE" == "all" ]]; then
+            python3 fill_narratives.py --all --date "$DATE"
+          else
+            python3 fill_narratives.py --today --date "$DATE"
+          fi
 
       - name: Commit and push completed report
         run: |
           git config user.name  "GlobalMarkets Bot"
           git config user.email "bot@globalmarkets.lucren"
-          git add Open/ Close/ Weekly/
+          git add Open/ Close/ Weekly/ Monthly/
           if git diff --cached --quiet; then
             echo "Nothing to commit."
           else
             TYPE=${{ steps.ctx.outputs.type }}
             DATE=${{ steps.ctx.outputs.date }}
-            git commit -m "Auto: $TYPE report $DATE [price + narrative]"
+            MONTH=${{ steps.ctx.outputs.month }}
+            if [[ "$TYPE" == "monthly" ]]; then
+              git commit -m "Auto: monthly report $MONTH [price + narrative]"
+            else
+              git commit -m "Auto: $TYPE report $DATE [price + narrative]"
+            fi
             git push
           fi
 
       - name: Post report to Discord
         env:
-          DISCORD_WEBHOOK_OPEN:   ${{ secrets.DISCORD_WEBHOOK_OPEN }}
-          DISCORD_WEBHOOK_CLOSE:  ${{ secrets.DISCORD_WEBHOOK_CLOSE }}
-          DISCORD_WEBHOOK_WEEKLY: ${{ secrets.DISCORD_WEBHOOK_WEEKLY }}
+          DISCORD_WEBHOOK_OPEN:    ${{ secrets.DISCORD_WEBHOOK_OPEN }}
+          DISCORD_WEBHOOK_CLOSE:   ${{ secrets.DISCORD_WEBHOOK_CLOSE }}
+          DISCORD_WEBHOOK_WEEKLY:  ${{ secrets.DISCORD_WEBHOOK_WEEKLY }}
+          DISCORD_WEBHOOK_MONTHLY: ${{ secrets.DISCORD_WEBHOOK_MONTHLY }}
         run: |
           TYPE=${{ steps.ctx.outputs.type }}
           DATE=${{ steps.ctx.outputs.date }}
+          MONTH=${{ steps.ctx.outputs.month }}
+
           if [[ "$TYPE" == "all" ]]; then
             python3 post_discord.py --type open   --date "$DATE" || true
             python3 post_discord.py --type close  --date "$DATE" || true
             python3 post_discord.py --type weekly --date "$DATE" || true
+          elif [[ "$TYPE" == "monthly" ]]; then
+            python3 post_discord.py --type monthly --month "$MONTH" || true
           else
             python3 post_discord.py --type "$TYPE" --date "$DATE" || true
           fi
-
-  # ---------------------------------------------------------------------------
-  # Monthly job
-  # ---------------------------------------------------------------------------
-  generate-monthly:
-    runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'monthly')
-      || (github.event_name == 'schedule' && github.event.schedule == '0 14 1 * *')
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: pip install requests yfinance anthropic xhtml2pdf markdown
-
-      - name: Determine month
-        id: mctx
-        run: |
-          INPUT_MONTH="${{ github.event.inputs.report_month }}"
-          if [[ -n "$INPUT_MONTH" ]]; then
-            MONTH="$INPUT_MONTH"
-          else
-            # Previous month
-            MONTH=$(date -u -d "$(date +%Y-%m-01) -1 day" +%Y-%m 2>/dev/null \
-                    || python3 -c "
-from datetime import datetime, timedelta
-d = datetime.utcnow().replace(day=1) - timedelta(days=1)
-print(d.strftime('%Y-%m'))")
-          fi
-          echo "month=$MONTH" >> $GITHUB_OUTPUT
-          echo "Monthly report for: $MONTH"
-
-      - name: Write .env from GitHub Secrets
-        run: |
-          cat > .env << ENVEOF
-          POLYGON_API_KEY=${{ secrets.POLYGON_API_KEY }}
-          ALPHA_VANTAGE_API_KEY=${{ secrets.ALPHA_VANTAGE_API_KEY }}
-          FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
-          FMP_API_KEY=${{ secrets.FMP_API_KEY }}
-          FRED_API_KEY=${{ secrets.FRED_API_KEY }}
-          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
-          ENVEOF
-
-      - name: Generate monthly price data (generate_monthly.py)
-        run: |
-          MONTH=${{ steps.mctx.outputs.month }}
-          python3 generate_monthly.py --month "$MONTH"
-
-      - name: Fill monthly narrative (fill_narratives.py)
-        run: |
-          MONTH=${{ steps.mctx.outputs.month }}
-          python3 fill_narratives.py --monthly --month "$MONTH"
-
-      - name: Commit and push monthly report
-        run: |
-          git config user.name  "GlobalMarkets Bot"
-          git config user.email "bot@globalmarkets.lucren"
-          git add Monthly/
-          if git diff --cached --quiet; then
-            echo "Nothing to commit."
-          else
-            MONTH=${{ steps.mctx.outputs.month }}
-            git commit -m "Auto: monthly report $MONTH [price + narrative]"
-            git push
-          fi
-
-      - name: Post monthly report to Discord
-        env:
-          DISCORD_WEBHOOK_MONTHLY: ${{ secrets.DISCORD_WEBHOOK_MONTHLY }}
-        run: |
-          MONTH=${{ steps.mctx.outputs.month }}
-          python3 post_discord.py --type monthly --month "$MONTH" || true
