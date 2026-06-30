@@ -77,10 +77,7 @@ jobs:
           if [[ -n "$INPUT_MONTH" ]]; then
             MONTH="$INPUT_MONTH"
           else
-            MONTH=$(python3 -c "
-from datetime import datetime, timedelta
-d = datetime.utcnow().replace(day=1) - timedelta(days=1)
-print(d.strftime('%Y-%m'))")
+            MONTH=$(python3 -c "from datetime import datetime,timedelta; d=datetime.utcnow().replace(day=1)-timedelta(days=1); print(d.strftime('%Y-%m'))")
           fi
 
           echo "type=$TYPE"   >> $GITHUB_OUTPUT
