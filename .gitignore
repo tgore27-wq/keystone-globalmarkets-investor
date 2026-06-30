@@ -3,3 +3,9 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Private local PDFs (include Lucren content ideas — never commit)
+Open/*.pdf
+Close/*.pdf
+Weekly/*.pdf
+Monthly/*.pdf
