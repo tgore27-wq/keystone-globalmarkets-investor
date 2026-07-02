@@ -4,13 +4,9 @@ permissions:
   contents: write
 
 on:
-  schedule:
-    # All times UTC — Eastern Daylight Time (EDT) = UTC-4 (summer)
-    # When clocks fall back in Nov (EST = UTC-5), update these +1 hour
-    - cron: '30 13 * * 1-5'   # 9:30 AM ET  — Open report   (Mon-Fri)
-    - cron: '0 20 * * 1-5'    # 4:00 PM ET  — Close report  (Mon-Fri)
-    - cron: '0 21 * * 5'      # 5:00 PM ET  — Weekly recap  (Friday only)
-    - cron: '0 14 1 * *'      # 10:00 AM ET — Monthly recap (1st of each month)
+  # Scheduling is handled by local Mac crontab via run_report.sh for precise
+  # 9:30 AM / 4:30 PM ET timing. GitHub Actions cron can delay by hours.
+  # Use workflow_dispatch below for manual one-off runs or if Mac is unavailable.
   workflow_dispatch:
     inputs:
       report_type:
